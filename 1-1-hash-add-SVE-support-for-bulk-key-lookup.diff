@@ -1,0 +1,80 @@
+diff --git a/.mailmap b/.mailmap
+index 864d33ee46..2cce48c900 100644
+--- a/.mailmap
++++ b/.mailmap
+@@ -481,6 +481,7 @@ Hari Kumar Vemula <hari.kumarx.vemula@intel.com>
+ Harini Ramakrishnan <harini.ramakrishnan@microsoft.com>
+ Hariprasad Govindharajan <hariprasad.govindharajan@intel.com>
+ Harish Patil <harish.patil@cavium.com> <harish.patil@qlogic.com>
++Harjot Singh <harjot.singh@arm.com>
+ Harman Kalra <hkalra@marvell.com>
+ Harneet Singh <harneet.singh@intel.com>
+ Harold Huang <baymaxhuang@gmail.com>
+diff --git a/lib/hash/rte_cuckoo_hash.c b/lib/hash/rte_cuckoo_hash.c
+index d92a903bb3..fdb06eb33e 100644
+--- a/lib/hash/rte_cuckoo_hash.c
++++ b/lib/hash/rte_cuckoo_hash.c
+@@ -435,8 +435,11 @@ rte_hash_create(const struct rte_hash_parameters *params)
+ 		h->sig_cmp_fn = RTE_HASH_COMPARE_SSE;
+ 	else
+ #elif defined(RTE_ARCH_ARM64)
+-	if (rte_cpu_get_flag_enabled(RTE_CPUFLAG_NEON))
++	if (rte_cpu_get_flag_enabled(RTE_CPUFLAG_NEON)) {
+ 		h->sig_cmp_fn = RTE_HASH_COMPARE_NEON;
++		if (rte_cpu_get_flag_enabled(RTE_CPUFLAG_SVE))
++			h->sig_cmp_fn = RTE_HASH_COMPARE_SVE;
++	}
+ 	else
+ #endif
+ 		h->sig_cmp_fn = RTE_HASH_COMPARE_SCALAR;
+@@ -1892,6 +1895,38 @@ compare_signatures(uint32_t *prim_hash_matches, uint32_t *sec_hash_matches,
+ 		*sec_hash_matches = (uint32_t)(vaddvq_u16(x));
+ 		}
+ 		break;
++#if  defined(RTE_HAS_SVE_ACLE)
++	case RTE_HASH_COMPARE_SVE: {
++		svuint16_t vsign, shift, sv_prim_matches, sv_sec_matches;
++		svbool_t pred, p_match, s_match;
++		int i = 0;
++		uint64_t vl = svcnth();
++
++		vsign = svdup_u16(sig);
++		shift = svindex_u16(0, 2);
++		do {
++			pred = svwhilelt_b16(i, RTE_HASH_BUCKET_ENTRIES);
++			/* Compare all signatures in the primary bucket */
++			p_match  = svcmpeq_u16(pred, vsign, svld1_u16(pred,
++						&prim_bkt->sig_current[i]));
++			if (svptest_any(svptrue_b16(), p_match)) {
++				sv_prim_matches =  svdup_u16_z(p_match, 1);
++				sv_prim_matches = svlsl_u16_z(pred, sv_prim_matches, shift);
++				*prim_hash_matches |= svorv_u16(pred, sv_prim_matches);
++			}
++			/* Compare all signatures in the secondary bucket */
++			s_match  = svcmpeq_u16(pred, vsign, svld1_u16(pred,
++						&sec_bkt->sig_current[i]));
++			if (svptest_any(svptrue_b16(), s_match)) {
++				sv_sec_matches =  svdup_u16_z(s_match, 1);
++				sv_sec_matches = svlsl_u16_z(pred, sv_sec_matches, shift);
++				*sec_hash_matches |= svorv_u16(pred, sv_sec_matches);
++			}
++			i += vl;
++		} while (i < RTE_HASH_BUCKET_ENTRIES);
++	}
++	break;
++#endif
+ #endif
+ 	default:
+ 		for (i = 0; i < RTE_HASH_BUCKET_ENTRIES; i++) {
+diff --git a/lib/hash/rte_cuckoo_hash.h b/lib/hash/rte_cuckoo_hash.h
+index eb2644f74b..356ec2a69e 100644
+--- a/lib/hash/rte_cuckoo_hash.h
++++ b/lib/hash/rte_cuckoo_hash.h
+@@ -148,6 +148,7 @@ enum rte_hash_sig_compare_function {
+ 	RTE_HASH_COMPARE_SCALAR = 0,
+ 	RTE_HASH_COMPARE_SSE,
+ 	RTE_HASH_COMPARE_NEON,
++	RTE_HASH_COMPARE_SVE,
+ 	RTE_HASH_COMPARE_NUM
+ };
+ 
